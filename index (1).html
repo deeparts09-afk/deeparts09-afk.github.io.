@@ -1,0 +1,656 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Marketing Billing System</title>
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link rel="stylesheet" href="style.css">
+    <style>
+        :root {
+            --primary: #2563eb;
+            --primary-hover: #1d4ed8;
+            --bg-main: #f8fafc;
+            --bg-card: #ffffff;
+            --text-main: #0f172a;
+            --text-muted: #64748b;
+            --border: #e2e8f0;
+            --success: #10b981;
+            --warning: #f59e0b;
+            --danger: #ef4444;
+            --shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1);
+            --font-sans: 'Inter', system-ui, sans-serif;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: var(--font-sans);
+            background: var(--bg-main);
+            color: var(--text-main);
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+
+        .card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 0.75rem;
+            padding: 1.5rem;
+            box-shadow: var(--shadow);
+        }
+
+        .btn {
+            padding: 0.5rem 1rem;
+            border-radius: 0.5rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: 0.2s;
+            border: none;
+        }
+
+        .btn-primary {
+            background: var(--primary);
+            color: white;
+        }
+
+        .input {
+            width: 100%;
+            padding: 0.625rem;
+            border: 1px solid var(--border);
+            border-radius: 0.5rem;
+            outline: none;
+        }
+
+        .grid {
+            display: grid;
+            gap: 1.5rem;
+        }
+
+        .grid-3 {
+            grid-template-columns: repeat(3, 1fr);
+        }
+
+        .badge {
+            padding: 0.25rem 0.5rem;
+            border-radius: 9999px;
+            font-size: 0.75rem;
+        }
+
+        .badge-success {
+            background: #dcfce7;
+            color: #166534;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect } = React;
+        const socket = io();
+
+        function App() {
+            const [user, setUser] = useState(JSON.parse(localStorage.getItem('user')));
+            const [view, setView] = useState(user ? (user.role === 'admin' ? 'admin' : 'staff') : 'login');
+
+            if (view === 'login') return <Login setView={setView} setUser={setUser} />;
+            if (view === 'admin') return <AdminDashboard setUser={setUser} setView={setView} />;
+            if (view === 'billing') return <BillingPage setView={setView} />;
+            return <StaffDashboard setUser={setUser} setView={setView} />;
+        }
+
+        function Login({ setView, setUser }) {
+            const [email, setEmail] = useState('');
+            const [password, setPassword] = useState('');
+            const [error, setError] = useState('');
+
+            const handleLogin = async (e) => {
+                e.preventDefault();
+                const res = await fetch('/api/auth/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ email, password })
+                });
+                const data = await res.json();
+                if (res.ok) {
+                    localStorage.setItem('token', data.token);
+                    localStorage.setItem('user', JSON.stringify(data.user));
+                    setUser(data.user);
+                    setView(data.user.role === 'admin' ? 'admin' : 'staff');
+                } else {
+                    setError(data.message);
+                }
+            };
+
+            return (
+                <div style={{ display: 'flex', height: '100vh', alignItems: 'center', justifyContent: 'center' }}>
+                    <div className="card" style={{ width: '400px' }}>
+                        <h2 style={{ marginBottom: '1rem', textAlign: 'center' }}>Billing System Login</h2>
+                        {error && <p style={{ color: 'var(--danger)', textAlign: 'center' }}>{error}</p>}
+                        <form onSubmit={handleLogin} className="grid">
+                            <input className="input" type="email" placeholder="e.g., admin@example.com" value={email} onChange={e => setEmail(e.target.value)} required />
+                            <input className="input" type="password" placeholder="Enter your password" value={password} onChange={e => setPassword(e.target.value)} required />
+                            <button className="btn btn-primary" type="submit">Login</button>
+                        </form>
+                    </div>
+                </div>
+            );
+        }
+
+        function AdminDashboard({ setUser, setView }) {
+            const [stats, setStats] = useState(null);
+            const [sales, setSales] = useState([]);
+            const [sqlEvents, setSqlEvents] = useState([]);
+            const [activeTab, setActiveTab] = useState('overview');
+            const [products, setProducts] = useState([]);
+
+            // Staff creation state
+            const [staffName, setStaffName] = useState('');
+            const [staffEmail, setStaffEmail] = useState('');
+            const [staffPassword, setStaffPassword] = useState('');
+            const [staffMsg, setStaffMsg] = useState('');
+
+            // Product management state
+            const [pName, setPName] = useState('');
+            const [pPrice, setPPrice] = useState('');
+
+            const currentUser = JSON.parse(localStorage.getItem('user'));
+
+            useEffect(() => {
+                fetchStats();
+                fetchProducts();
+                socket.on('new_sale', (sale) => {
+                    setSales(prev => [sale, ...prev].slice(0, 5));
+                    fetchStats();
+                });
+                socket.on('sql_event', (event) => {
+                    setSqlEvents(prev => [event, ...prev].slice(0, 10));
+                });
+                return () => {
+                    socket.off('new_sale');
+                    socket.off('sql_event');
+                };
+            }, []);
+
+            const fetchStats = async () => {
+                const res = await fetch('/api/admin/summary', {
+                    headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+                });
+                const data = await res.json();
+                setStats(data);
+            };
+
+            const fetchProducts = async () => {
+                const res = await fetch('/api/products', {
+                    headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+                });
+                const data = await res.json();
+                setProducts(data);
+            };
+
+            const handleCreateProduct = async (e) => {
+                e.preventDefault();
+                const res = await fetch('/api/products', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${localStorage.getItem('token')}`
+                    },
+                    body: JSON.stringify({ name: pName, price: Number(pPrice) })
+                });
+                if (res.ok) {
+                    setPName(''); setPPrice(''); fetchProducts();
+                }
+            };
+            // ... rest of the UI logic will follow in the next block to avoid too many changes
+
+            const handleCreateStaff = async (e) => {
+                e.preventDefault();
+                const res = await fetch('/api/auth/register', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${localStorage.getItem('token')}`
+                    },
+                    body: JSON.stringify({ name: staffName, email: staffEmail, password: staffPassword, role: 'staff' })
+                });
+                if (res.ok) {
+                    setStaffMsg('Staff account created successfully!');
+                    setStaffName(''); setStaffEmail(''); setStaffPassword('');
+                } else {
+                    const data = await res.json();
+                    setStaffMsg('Error: ' + data.message);
+                }
+            };
+
+            return (
+                <div className="container">
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '2rem', alignItems: 'center' }}>
+                        <div>
+                            <h1>Admin Dashboard</h1>
+                            <p className="badge badge-success">Logged in as {currentUser.name} (Admin)</p>
+                        </div>
+                        <div style={{ display: 'flex', gap: '1rem' }}>
+                            <button className={`btn ${activeTab === 'overview' ? 'btn-primary' : ''}`} onClick={() => setActiveTab('overview')}>Overview</button>
+                            <button className={`btn ${activeTab === 'products' ? 'btn-primary' : ''}`} onClick={() => setActiveTab('products')}>Products</button>
+                            <button className={`btn ${activeTab === 'sql' ? 'btn-primary' : ''}`} onClick={() => setActiveTab('sql')}>SQL Monitor</button>
+                            <button className="btn" style={{ marginLeft: '2rem' }} onClick={() => { localStorage.clear(); setView('login'); }}>Logout</button>
+                        </div>
+                    </div>
+
+                    {activeTab === 'overview' && (
+                        <div className="grid" style={{ gridTemplateColumns: '1fr 2fr', marginBottom: '2rem' }}>
+                            <div className="card">
+                                <h3>Create Staff Account</h3>
+                                {staffMsg && <p style={{ margin: '1rem 0', color: staffMsg.includes('Error') ? 'var(--danger)' : 'var(--success)' }}>{staffMsg}</p>}
+                                <form onSubmit={handleCreateStaff} className="grid">
+                                    <input className="input" placeholder="Name" value={staffName} onChange={e => setStaffName(e.target.value)} required />
+                                    <input className="input" placeholder="Email" type="email" value={staffEmail} onChange={e => setStaffEmail(e.target.value)} required />
+                                    <input className="input" placeholder="Password" type="password" value={staffPassword} onChange={e => setStaffPassword(e.target.value)} required />
+                                    <button className="btn btn-primary" type="submit">Create Staff</button>
+                                </form>
+                            </div>
+
+                            <div className="grid">
+                                {stats && (
+                                    <div className="grid grid-3">
+                                        <div className="card"><h3>Revenue</h3><p>${stats.totalRevenue.toFixed(2)}</p></div>
+                                        <div className="card"><h3>Pending</h3><p>${stats.pendingPayments.toFixed(2)}</p></div>
+                                        <div className="card"><h3>Sales</h3><p>{stats.totalSales}</p></div>
+                                    </div>
+                                )}
+                                <div className="card">
+                                    <h3>Live Sales Feed</h3>
+                                    {sales.length === 0 && <p style={{ color: 'var(--text-muted)', marginTop: '1rem' }}>No recent sales activity.</p>}
+                                    {sales.map((s, i) => (
+                                        <div key={i} style={{ padding: '0.5rem 0', borderBottom: '1px solid #eee', display: 'flex', justifyContent: 'space-between' }}>
+                                            <span><strong>{s.invoice_number}</strong> by {s.staff_name}</span>
+                                            <strong>${s.total.toFixed(2)}</strong>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {activeTab === 'products' && (
+                        <div className="grid" style={{ gridTemplateColumns: '1fr 2fr' }}>
+                            <div className="card">
+                                <h3>Add New Product</h3>
+                                <form onSubmit={handleCreateProduct} className="grid" style={{ marginTop: '1rem' }}>
+                                    <input className="input" placeholder="Product Name" value={pName} onChange={e => setPName(e.target.value)} required />
+                                    <input className="input" type="number" placeholder="Price" value={pPrice} onChange={e => setPPrice(e.target.value)} required />
+                                    <button className="btn btn-primary" type="submit">Save Product</button>
+                                </form>
+                            </div>
+                            <div className="card">
+                                <h3>Inventory (SQL Managed)</h3>
+                                <div style={{ marginTop: '1rem' }}>
+                                    {products.map(p => (
+                                        <div key={p.id} style={{ display: 'flex', justifyContent: 'space-between', padding: '0.75rem', borderBottom: '1px solid #eee' }}>
+                                            <span>{p.name}</span>
+                                            <strong>${p.price.toFixed(2)}</strong>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {activeTab === 'sql' && (
+                        <div className="card">
+                            <h3>Live SQL Interaction Monitor</h3>
+                            <div style={{ marginTop: '1rem', background: '#1e1e1e', color: '#00ff00', padding: '1rem', borderRadius: '0.5rem', fontFamily: 'monospace', minHeight: '300px' }}>
+                                {sqlEvents.length === 0 && <p style={{ color: '#888' }}>Waiting for database interactions...</p>}
+                                {sqlEvents.map((ev, i) => (
+                                    <div key={i} style={{ marginBottom: '0.75rem', fontSize: '0.9rem' }}>
+                                        <span style={{ color: '#aaa' }}>[{ev.timestamp.split('T')[1].split('.')[0]}]</span>
+                                        <span style={{ color: '#ffcc00', marginLeft: '0.5rem' }}>{ev.type}</span>
+                                        <span style={{ color: '#00ccff', marginLeft: '0.5rem' }}>on {ev.table}</span>
+                                        <div style={{ paddingLeft: '1rem', color: '#eee', marginTop: '0.25rem' }}>{ev.query}</div>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        function BillingPage({ setView }) {
+            const [customers, setCustomers] = useState([]);
+            const [availableProducts, setAvailableProducts] = useState([]);
+            const [customerId, setCustomerId] = useState('');
+            const [items, setItems] = useState([{ product_name: '', quantity: 1, price: 0 }]);
+            const [discount, setDiscount] = useState(0);
+            const [msg, setMsg] = useState('');
+
+            useEffect(() => {
+                const headers = { 'Authorization': `Bearer ${localStorage.getItem('token')}` };
+                fetch('/api/customers', { headers }).then(res => res.json()).then(setCustomers);
+                fetch('/api/products', { headers }).then(res => res.json()).then(setAvailableProducts);
+            }, []);
+
+            const addItem = () => setItems([...items, { product_name: '', quantity: 1, price: 0 }]);
+            const updateItem = (i, field, value) => {
+                const newItems = [...items];
+                if (field === 'product_id') {
+                    const prod = availableProducts.find(p => p.id === Number(value));
+                    if (prod) {
+                        newItems[i].product_name = prod.name;
+                        newItems[i].price = prod.price;
+                    }
+                } else {
+                    newItems[i][field] = field === 'product_name' ? value : Number(value);
+                }
+                setItems(newItems);
+            };
+            // ... rest of logic stays similar
+
+            const subtotal = items.reduce((sum, item) => sum + (item.price * item.quantity), 0);
+            const tax = (subtotal - (subtotal * discount / 100)) * 0.1;
+            const total = subtotal - (subtotal * discount / 100) + tax;
+
+            const handleSubmit = async (e) => {
+                e.preventDefault();
+                const res = await fetch('/api/invoices', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${localStorage.getItem('token')}`
+                    },
+                    body: JSON.stringify({ customer_id: customerId, items, discount })
+                });
+                if (res.ok) {
+                    setMsg('Invoice generated successfully!');
+                    setTimeout(() => setView('staff'), 1500);
+                }
+            };
+
+            return (
+                <div className="container">
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '2rem' }}>
+                        <h1>Create New Invoice</h1>
+                        <button className="btn" onClick={() => setView('staff')}>Back</button>
+                    </div>
+
+                    <div className="card">
+                        {msg && <p className="badge badge-success" style={{ marginBottom: '1rem', display: 'block', textAlign: 'center' }}>{msg}</p>}
+                        <form onSubmit={handleSubmit} className="grid">
+                            <div>
+                                <label style={{ display: 'block', marginBottom: '0.5rem' }}>Select Customer</label>
+                                <select className="input" value={customerId} onChange={e => setCustomerId(e.target.value)} required>
+                                    <option value="">-- Choose Customer --</option>
+                                    {customers.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                                </select>
+                            </div>
+
+                            <div className="grid">
+                                <h3>Products/Services</h3>
+                                {items.map((item, i) => (
+                                    <div key={i} className="grid grid-3" style={{ gap: '0.5rem' }}>
+                                        <select className="input" onChange={e => updateItem(i, 'product_id', e.target.value)} required>
+                                            <option value="">-- Select Product --</option>
+                                            {availableProducts.map(p => <option key={p.id} value={p.id}>{p.name} (${p.price})</option>)}
+                                        </select>
+                                        <input className="input" type="number" placeholder="Qty" value={item.quantity} onChange={e => updateItem(i, 'quantity', e.target.value)} required />
+                                        <input className="input" type="number" placeholder="Total: $" value={(item.price * item.quantity).toFixed(2)} readOnly />
+                                    </div>
+                                ))}
+                                <button type="button" className="btn" onClick={addItem}>+ Add Item</button>
+                            </div>
+
+                            <div style={{ borderTop: '1px solid var(--border)', paddingTop: '1.5rem', marginTop: '1rem' }}>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
+                                    <span>Subtotal:</span><strong>${subtotal.toFixed(2)}</strong>
+                                </div>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.5rem', alignItems: 'center' }}>
+                                    <span>Discount (%):</span>
+                                    <input className="input" type="number" style={{ width: '80px' }} value={discount} onChange={e => setDiscount(Number(e.target.value))} />
+                                </div>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--primary)', fontSize: '1.5rem', fontWeight: 700 }}>
+                                    <span>Total:</span><strong>${total.toFixed(2)}</strong>
+                                </div>
+                            </div>
+
+                            <button className="btn btn-primary" type="submit" style={{ padding: '1rem' }}>Generate & Sync Invoice</button>
+                        </form>
+                    </div>
+                </div>
+            );
+        }
+
+        function StaffDashboard({ setUser, setView }) {
+            const [activeTab, setActiveTab] = useState('portal');
+            const [products, setProducts] = useState([]);
+            const [billItems, setBillItems] = useState([]);
+            const [billCustomerId, setBillCustomerId] = useState('');
+            const [billDiscount, setBillDiscount] = useState(0);
+            const [customers, setCustomers] = useState([]);
+
+            const [name, setName] = useState('');
+            const [contact, setContact] = useState('');
+            const [address, setAddress] = useState('');
+            const [msg, setMsg] = useState('');
+            const currentUser = JSON.parse(localStorage.getItem('user'));
+
+            useEffect(() => {
+                const headers = { 'Authorization': `Bearer ${localStorage.getItem('token')}` };
+                if (activeTab === 'products') {
+                    fetch('/api/products', { headers }).then(res => res.json()).then(setProducts);
+                    fetch('/api/customers', { headers }).then(res => res.json()).then(setCustomers);
+                }
+            }, [activeTab]);
+
+            const addToBill = (product) => {
+                const existing = billItems.find(item => item.product_id === product.id);
+                if (existing) {
+                    setBillItems(billItems.map(item =>
+                        item.product_id === product.id ? { ...item, quantity: item.quantity + 1 } : item
+                    ));
+                } else {
+                    setBillItems([...billItems, {
+                        product_id: product.id,
+                        product_name: product.name,
+                        price: product.price,
+                        quantity: 1
+                    }]);
+                }
+            };
+
+            const removeFromBill = (id) => setBillItems(billItems.filter(item => item.product_id !== id));
+
+            const updateQty = (id, q) => setBillItems(billItems.map(item =>
+                item.product_id === id ? { ...item, quantity: Math.max(1, Number(q)) } : item
+            ));
+
+            const subtotal = billItems.reduce((acc, item) => acc + (item.price * item.quantity), 0);
+            const tax = (subtotal - (subtotal * billDiscount / 100)) * 0.1;
+            const total = (subtotal - (subtotal * billDiscount / 100)) + tax;
+
+            const handleFinalizeBill = async () => {
+                if (!billCustomerId) return alert('Please select a customer');
+                const res = await fetch('/api/invoices', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${localStorage.getItem('token')}`
+                    },
+                    body: JSON.stringify({
+                        customer_id: billCustomerId,
+                        items: billItems,
+                        discount: billDiscount
+                    })
+                });
+                if (res.ok) {
+                    setMsg('Invoice billed successfully!');
+                    setBillItems([]); setBillCustomerId(''); setBillDiscount(0);
+                    setTimeout(() => setMsg(''), 3000);
+                }
+            };
+
+            const handleCreate = async (e) => {
+                e.preventDefault();
+                const res = await fetch('/api/customers', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${localStorage.getItem('token')}`
+                    },
+                    body: JSON.stringify({ name, contact, address })
+                });
+                if (res.ok) {
+                    setMsg('Customer created successfully!');
+                    setName(''); setContact(''); setAddress('');
+                    setTimeout(() => setMsg(''), 3000);
+                }
+            };
+
+            return (
+                <div className="container">
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '2rem', alignItems: 'center' }}>
+                        <div>
+                            <h1>Staff Portal</h1>
+                            <p className="badge badge-success">Logged in as {currentUser.name} (Staff)</p>
+                        </div>
+                        <div style={{ display: 'flex', gap: '1rem' }}>
+                            <button className={`btn ${activeTab === 'portal' ? 'btn-primary' : ''}`} onClick={() => setActiveTab('portal')}>Portal</button>
+                            <button className={`btn ${activeTab === 'products' ? 'btn-primary' : ''}`} onClick={() => setActiveTab('products')}>Products & Billing</button>
+                            <button className="btn" onClick={() => { localStorage.clear(); setView('login'); }}>Logout</button>
+                        </div>
+                    </div>
+
+                    {msg && <div className="badge badge-success" style={{ marginBottom: '1rem', width: '100%', textAlign: 'center' }}>{msg}</div>}
+
+                    {activeTab === 'portal' && (
+                        <div className="grid" style={{ gridTemplateColumns: '1fr 1fr' }}>
+                            <div className="card">
+                                <h3>Staff Quick Actions</h3>
+                                <div className="grid" style={{ marginTop: '1rem' }}>
+                                    <button className="btn btn-primary" onClick={() => setActiveTab('products')}>Go to Product Billing</button>
+                                </div>
+                                <hr style={{ margin: '1.5rem 0', borderColor: 'var(--border)' }} />
+                                <h3>Create New Customer</h3>
+                                <form onSubmit={handleCreate} className="grid">
+                                    <input className="input" placeholder="Full Name" value={name} onChange={e => setName(e.target.value)} required />
+                                    <input className="input" placeholder="Contact" value={contact} onChange={e => setContact(e.target.value)} required />
+                                    <input className="input" placeholder="Address" value={address} onChange={e => setAddress(e.target.value)} required />
+                                    <button className="btn btn-primary" type="submit">Add Customer</button>
+                                </form>
+                            </div>
+                            <div className="card">
+                                <h3>Staff Statistics</h3>
+                                <p style={{ color: 'var(--text-muted)' }}>Real-time stats sync with Admin.</p>
+                                <div style={{ marginTop: '1rem', borderTop: '1px solid #eee', paddingTop: '1rem' }}>
+                                    <li>Automated 5% Commission</li>
+                                    <li>Live Sales Monitoring</li>
+                                    <li>SQL-Backed Accuracy</li>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {activeTab === 'products' && (
+                        <div className="grid" style={{ gridTemplateColumns: 'minmax(0, 1fr) 350px', gap: '2rem' }}>
+                            <div className="card">
+                                <h3>Product Inventory</h3>
+                                <div style={{ marginTop: '1rem', overflowX: 'auto' }}>
+                                    <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                                        <thead>
+                                            <tr style={{ background: '#f8fafc', textAlign: 'left' }}>
+                                                <th style={{ padding: '0.75rem' }}>Name</th>
+                                                <th style={{ padding: '0.75rem' }}>Price</th>
+                                                <th style={{ padding: '0.75rem' }}>Action</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {products.map(p => (
+                                                <tr key={p.id} style={{ borderBottom: '1px solid #eee' }}>
+                                                    <td style={{ padding: '0.75rem' }}>
+                                                        <strong>{p.name}</strong>
+                                                        <div style={{ fontSize: '0.8rem', color: '#666' }}>{p.description}</div>
+                                                    </td>
+                                                    <td style={{ padding: '0.75rem' }}>${p.price.toFixed(2)}</td>
+                                                    <td style={{ padding: '0.75rem' }}>
+                                                        <button className="btn btn-primary btn-sm" onClick={() => addToBill(p)}>+ Add</button>
+                                                    </td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+
+                            <div className="card" style={{ height: 'fit-content', position: 'sticky', top: '1rem' }}>
+                                <h3>Billing Calculator</h3>
+                                <div style={{ marginTop: '1rem' }}>
+                                    <select className="input" style={{ marginBottom: '1rem' }} value={billCustomerId} onChange={e => setBillCustomerId(e.target.value)}>
+                                        <option value="">-- Select Customer --</option>
+                                        {customers.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                                    </select>
+
+                                    <div style={{ maxHeight: '200px', overflowY: 'auto', marginBottom: '1rem' }}>
+                                        {billItems.length === 0 && <p style={{ textAlign: 'center', color: '#888', padding: '1rem' }}>No items added.</p>}
+                                        {billItems.map(item => (
+                                            <div key={item.product_id} style={{ padding: '0.5rem 0', borderBottom: '1px solid #eee', fontSize: '0.9rem' }}>
+                                                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                                                    <span>{item.product_name}</span>
+                                                    <button style={{ color: 'var(--danger)', background: 'none', border: 'none', cursor: 'pointer' }} onClick={() => removeFromBill(item.product_id)}>×</button>
+                                                </div>
+                                                <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '0.25rem' }}>
+                                                    <div>
+                                                        Qty: <input type="number" style={{ width: '40px' }} value={item.quantity} onChange={e => updateQty(item.product_id, e.target.value)} />
+                                                    </div>
+                                                    <strong>${(item.price * item.quantity).toFixed(2)}</strong>
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+
+                                    {billItems.length > 0 && (
+                                        <div style={{ borderTop: '2px solid #333', paddingTop: '1rem' }}>
+                                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.85rem' }}>
+                                                <span>Subtotal:</span><span>${subtotal.toFixed(2)}</span>
+                                            </div>
+                                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', margin: '0.5rem 0', fontSize: '0.85rem' }}>
+                                                <span>Discount (%):</span>
+                                                <input className="input" type="number" style={{ width: '60px', height: '30px' }} value={billDiscount} onChange={e => setBillDiscount(Number(e.target.value))} />
+                                            </div>
+                                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.85rem' }}>
+                                                <span>Tax (10%):</span><span>${tax.toFixed(2)}</span>
+                                            </div>
+                                            <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: 'bold', fontSize: '1.2rem', marginTop: '0.5rem', color: 'var(--primary)' }}>
+                                                <span>Total:</span><span>${total.toFixed(2)}</span>
+                                            </div>
+                                            <button className="btn btn-primary" style={{ width: '100%', marginTop: '1rem', padding: '0.75rem' }} onClick={handleFinalizeBill}>Finalize & Bill SQL</button>
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+
+</html>
